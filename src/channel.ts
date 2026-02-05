@@ -37,6 +37,11 @@ import { createGroupHistoryManager, type HistoryEntry } from "./history.js";
 import { buildFeishuMessageContext } from "./context.js";
 import { dispatchFeishuMessage, createDefaultReplySender, createDefaultMediaSender } from "./dispatch.js";
 
+// Node.js imports for media handling
+import { writeFile, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 // ============ Helper Functions ============
 
 /**
@@ -66,6 +71,66 @@ async function fetchReplyContext(
   }
 
   return inbound;
+}
+
+/**
+ * Save media data to a temporary file
+ */
+async function saveTempMedia(
+  data: ArrayBuffer,
+  key: string,
+  fileName?: string,
+  defaultExt: string = "bin",
+): Promise<string> {
+  const dir = join(tmpdir(), "openclaw-feishu-media");
+  await mkdir(dir, { recursive: true });
+  const ext = fileName?.split(".").pop() ?? defaultExt;
+  const path = join(dir, `${key}.${ext}`);
+  await writeFile(path, Buffer.from(data));
+  return path;
+}
+
+/**
+ * Download media from Feishu message (image/file/audio/video)
+ */
+async function downloadMessageMedia(
+  account: ResolvedFeishuAccount,
+  message: FeishuInboundMessage,
+  log?: { warn?: (msg: string) => void },
+): Promise<FeishuInboundMessage> {
+  // Image message
+  if (message.imageKey) {
+    try {
+      const result = await api.downloadImage(account, message.imageKey);
+      if (result.ok && result.data) {
+        const tempPath = await saveTempMedia(result.data, message.imageKey, undefined, "png");
+        return { ...message, mediaPath: tempPath, mediaType: "image/png" };
+      }
+      log?.warn?.(`failed to download image ${message.imageKey}: ${result.error ?? "unknown error"}`);
+    } catch (err) {
+      log?.warn?.(`failed to download image ${message.imageKey}: ${String(err)}`);
+    }
+  }
+
+  // File/audio/video message
+  if (message.fileKey) {
+    try {
+      const result = await api.downloadFile(account, message.fileKey);
+      if (result.ok && result.data) {
+        const ext = message.messageType === "audio" ? "ogg" : message.messageType === "media" ? "mp4" : undefined;
+        const tempPath = await saveTempMedia(result.data, message.fileKey, message.fileName, ext);
+        const mimeType = message.messageType === "audio" ? "audio/ogg"
+          : message.messageType === "media" ? "video/mp4"
+          : "application/octet-stream";
+        return { ...message, mediaPath: tempPath, mediaType: mimeType };
+      }
+      log?.warn?.(`failed to download file ${message.fileKey}: ${result.error ?? "unknown error"}`);
+    } catch (err) {
+      log?.warn?.(`failed to download file ${message.fileKey}: ${String(err)}`);
+    }
+  }
+
+  return message;
 }
 
 // Channel metadata
@@ -748,6 +813,9 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount> = {
         // Fetch reply context if this is a reply
         const messageWithContext = await fetchReplyContext(account, inbound, ctx.log);
 
+        // Download media (image/file/audio/video) if present
+        const messageWithMedia = await downloadMessageMedia(account, messageWithContext, ctx.log);
+
         // Prepare group history
         const isGroup = inbound.chatType === "group";
         const historyEntry: HistoryEntry | undefined = isGroup
@@ -765,7 +833,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount> = {
         try {
           // Build message context using local module
           const context = await buildFeishuMessageContext({
-            message: messageWithContext,
+            message: messageWithMedia,
             account,
             cfg: ctx.cfg,
             botOpenId,

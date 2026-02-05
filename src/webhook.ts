@@ -341,6 +341,10 @@ function handleBotRemoved(event: FeishuBotRemovedEvent): FeishuWebhookResult {
 
 /**
  * Extract plain text from post content
+ * Supports multiple formats:
+ * - { zh_cn: { title, content } } - with language tag
+ * - { title, content } - direct format (common in received messages)
+ * - { post: { zh_cn: { ... } } } - nested post field
  */
 function extractTextFromPost(content: unknown): string {
   const texts: string[] = [];
@@ -351,30 +355,58 @@ function extractTextFromPost(content: unknown): string {
         continue;
       }
 
-      const el = element as { tag?: string; text?: string; content?: unknown[][] };
+      const el = element as { tag?: string; text?: string; user_name?: string };
 
-      if (el.tag === "text" && el.text) {
+      if ((el.tag === "text" || el.tag === "a") && el.text) {
         texts.push(el.text);
-      } else if (el.tag === "a" && el.text) {
-        texts.push(el.text);
+      } else if (el.tag === "at" && el.user_name) {
+        texts.push(`@${el.user_name}`);
       }
     }
   }
 
-  if (typeof content === "object" && content !== null) {
-    const post = content as {
-      zh_cn?: { content?: unknown[][] };
-      en_us?: { content?: unknown[][] };
-    };
+  if (typeof content !== "object" || content === null) {
+    return "";
+  }
 
-    // Try zh_cn first, then en_us
-    const postContent = post.zh_cn?.content || post.en_us?.content;
+  const obj = content as Record<string, unknown>;
 
-    if (Array.isArray(postContent)) {
-      for (const line of postContent) {
-        if (Array.isArray(line)) {
-          extractFromElements(line);
-        }
+  let postContent: unknown[][] | undefined;
+  let title: string | undefined;
+
+  // Format 1: { zh_cn/en_us: { title, content } }
+  const langPost = (obj.zh_cn || obj.en_us) as { title?: string; content?: unknown[][] } | undefined;
+  if (langPost?.content) {
+    postContent = langPost.content;
+    title = langPost.title;
+  }
+
+  // Format 2: { title, content } - direct format
+  if (!postContent && Array.isArray(obj.content)) {
+    postContent = obj.content as unknown[][];
+    title = obj.title as string | undefined;
+  }
+
+  // Format 3: { post: { zh_cn: { ... } } }
+  if (!postContent && obj.post) {
+    const nested = obj.post as Record<string, unknown>;
+    const nestedLang = (nested.zh_cn || nested.en_us) as { title?: string; content?: unknown[][] } | undefined;
+    if (nestedLang?.content) {
+      postContent = nestedLang.content;
+      title = nestedLang.title;
+    }
+  }
+
+  // Extract title
+  if (title) {
+    texts.push(title);
+  }
+
+  // Extract content
+  if (Array.isArray(postContent)) {
+    for (const line of postContent) {
+      if (Array.isArray(line)) {
+        extractFromElements(line);
       }
     }
   }
